@@ -10,7 +10,7 @@ from scheduler.models import RepeatableJob, ScheduledJob
 def run_job_now(modeladmin, request, queryset):
     running_jobs = ''
     for job in queryset:
-        job.scheduler().enqueue_at(job.schedule_time_utc(), job.callable_func())
+        job.scheduler().enqueue_at(job.schedule_time_utc(), job.callable_func(), timeout=job.timeout)
         running_jobs = running_jobs + str(job.name) + ','
 
     messages.success(request,
