@@ -1,5 +1,7 @@
 from __future__ import unicode_literals
 
+import datetime
+
 from django.conf import settings
 from django.contrib import admin, messages
 from django.utils.translation import ugettext_lazy as _
@@ -10,7 +12,8 @@ from scheduler.models import RepeatableJob, ScheduledJob
 def run_job_now(modeladmin, request, queryset):
     running_jobs = ''
     for job in queryset:
-        job.scheduler().enqueue_at(job.schedule_time_utc(), job.callable_func())
+        right_now = datetime.datetime.now()
+        job.scheduler().enqueue_at(right_now, job.callable_func())
         running_jobs = running_jobs + str(job.name) + ','
 
     messages.success(request,
