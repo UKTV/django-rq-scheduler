@@ -1,14 +1,26 @@
 from __future__ import unicode_literals
 
+import datetime
+
 from django.conf import settings
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.utils.translation import ugettext_lazy as _
 
 from scheduler.models import CronJob, RepeatableJob, ScheduledJob
 
 
-QUEUES = [(key, key) for key in settings.RQ_QUEUES.keys()]
+def run_job_now(modeladmin, request, queryset):
+    running_jobs = ''
+    for job in queryset:
+        right_now = datetime.datetime.utcnow()
+        job.scheduler().enqueue_at(right_now, job.callable_func(), timeout=job.timeout)
 
+        running_jobs = running_jobs + str(job.name) + ','
+
+    messages.success(request,
+                     'The following jobs have been run; {}'.format(running_jobs[:-1]))
+
+run_job_now.short_description = "Run now"
 
 class QueueMixin(object):
     actions = ['delete_model']
@@ -19,8 +31,6 @@ class QueueMixin(object):
         return actions
 
     def get_form(self, request, obj=None, **kwargs):
-        queue_field = self.model._meta.get_field('queue')
-        queue_field.choices = QUEUES
         return super(QueueMixin, self).get_form(request, obj, **kwargs)
 
     def delete_model(self, request, obj):
@@ -64,7 +74,7 @@ class RepeatableJobAdmin(QueueMixin, admin.ModelAdmin):
         'enabled')
     list_filter = ('enabled', )
     list_editable = ('enabled', )
-
+    actions = QueueMixin.actions + [run_job_now]
     readonly_fields = ('job_id', )
     fieldsets = (
         (None, {
