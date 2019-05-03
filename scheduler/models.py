@@ -2,6 +2,8 @@ from __future__ import unicode_literals
 import importlib
 from datetime import timedelta
 
+import croniter
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -23,7 +25,6 @@ class BaseJob(TimeStampedModel):
     queue = models.CharField(_('queue'), max_length=16)
     job_id = models.CharField(
         _('job id'), max_length=128, editable=False, blank=True, null=True)
-    scheduled_time = models.DateTimeField(_('scheduled time'))
     timeout = models.IntegerField(
         _('timeout'), blank=True, null=True,
         help_text=_(
@@ -31,6 +32,13 @@ class BaseJob(TimeStampedModel):
             'before it\'ll be considered \'lost\'. Blank uses the default '
             'timeout.'
         )
+    )
+    result_ttl = models.IntegerField(
+        _('result ttl'), blank=True, null=True,
+        help_text=_('The TTL value (in seconds) of the job result. -1: '
+                    'Result never expires, you should delete jobs manually. '
+                    '0: Result gets deleted immediately. >0: Result expires '
+                    'after n seconds.')
     )
 
     def __str__(self):
@@ -67,7 +75,7 @@ class BaseJob(TimeStampedModel):
             })
 
     def is_scheduled(self):
-        return self.job_id in self.scheduler()
+        return self.job_id and self.job_id in self.scheduler()
     is_scheduled.short_description = _('is scheduled?')
     is_scheduled.boolean = True
 
@@ -76,6 +84,10 @@ class BaseJob(TimeStampedModel):
         if self.enabled:
             self.schedule()
         super(BaseJob, self).save(**kwargs)
+
+    def delete(self, **kwargs):
+        self.unschedule()
+        super(BaseJob, self).delete(**kwargs)
 
     def scheduler(self):
         return django_rq.get_scheduler(self.queue)
@@ -91,6 +103,8 @@ class BaseJob(TimeStampedModel):
         kwargs = {}
         if self.timeout:
             kwargs['timeout'] = self.timeout
+        if self.result_ttl is not None:
+            kwargs['result_ttl'] = self.result_ttl
         job = self.scheduler().enqueue_at(
             self.schedule_time_utc(), self.callable_func(),
             **kwargs
@@ -111,7 +125,18 @@ class BaseJob(TimeStampedModel):
         abstract = True
 
 
-class ScheduledJob(BaseJob):
+class ScheduledTimeMixin(models.Model):
+
+    scheduled_time = models.DateTimeField(_('scheduled time'))
+
+    def schedule_time_utc(self):
+        return utc(self.scheduled_time)
+
+    class Meta:
+        abstract = True
+
+
+class ScheduledJob(ScheduledTimeMixin, BaseJob):
 
     class Meta:
         verbose_name = _('Scheduled Job')
@@ -119,7 +144,7 @@ class ScheduledJob(BaseJob):
         ordering = ('name', )
 
 
-class RepeatableJob(BaseJob):
+class RepeatableJob(ScheduledTimeMixin, BaseJob):
 
     UNITS = Choices(
         ('minutes', _('minutes')),
@@ -154,6 +179,8 @@ class RepeatableJob(BaseJob):
         }
         if self.timeout:
             kwargs['timeout'] = self.timeout
+        if self.result_ttl is not None:
+            kwargs['result_ttl'] = self.result_ttl
         job = self.scheduler().schedule(**kwargs)
         self.job_id = job.id
         return True
@@ -161,4 +188,46 @@ class RepeatableJob(BaseJob):
     class Meta:
         verbose_name = _('Repeatable Job')
         verbose_name_plural = _('Repeatable Jobs')
+        ordering = ('name', )
+
+
+class CronJob(BaseJob):
+    result_ttl = None
+
+    cron_string = models.CharField(
+        _('cron string'), max_length=64,
+        help_text=_('Define the schedule in a crontab like syntax.')
+    )
+    repeat = models.PositiveIntegerField(_('repeat'), blank=True, null=True)
+
+    def clean(self):
+        super(CronJob, self).clean()
+        self.clean_cron_string()
+
+    def clean_cron_string(self):
+        try:
+            croniter.croniter(self.cron_string)
+        except ValueError as e:
+            raise ValidationError({
+                'cron_string': ValidationError(
+                    _(str(e)), code='invalid')
+            })
+
+    def schedule(self):
+        if self.is_schedulable() is False:
+            return False
+        kwargs = {
+            'func': self.callable_func(),
+            'cron_string': self.cron_string,
+            'repeat': self.repeat
+        }
+        if self.timeout:
+            kwargs['timeout'] = self.timeout
+        job = self.scheduler().cron(**kwargs)
+        self.job_id = job.id
+        return True
+
+    class Meta:
+        verbose_name = _('Cron Job')
+        verbose_name_plural = _('Cron Jobs')
         ordering = ('name', )
